@@ -15,7 +15,7 @@ The application is packaged using a `python:3.12-slim` base image, chosen for it
 Rather than pulling from Docker Hub, images are pushed to MicroK8s's built-in private registry at `localhost:32000`. This eliminates external network dependency during deployment, speeds up pod startup, and mirrors real production workflows where organizations maintain private registries for security and control.
 
 ### Ingress
-Traffic routing is handled by the Traefik ingress controller (enabled via MicroK8s addon). An Ingress resource routes external HTTP requests to `myapp.local` through to the internal ClusterIP service, which then distributes traffic across pod replicas. This separation of concerns — Ingress for routing, Service for discovery, Deployment for compute — follows Kubernetes best practices.
+Traffic routing is handled by the NGINX ingress controller (deployed via Helm). An Ingress resource routes external HTTP requests to `myapp.local` through to the internal ClusterIP service, which then distributes traffic across pod replicas. This separation of concerns — Ingress for routing, Service for discovery, Deployment for compute — follows Kubernetes best practices.
 
 ---
 
@@ -44,9 +44,9 @@ These conservative values allowed stable operation of multiple pods on a single-
 
 ## 3. Hardware Constraints & Lessons Learned
 
-The project was deployed on a QEMU virtual machine running Ubuntu 24.04 LTS with 2 vCPUs and 4GB RAM. Several challenges arose from this constrained environment:
+The project was deployed on a QEMU virtual machine running Ubuntu 24.04 LTS with 4 vCPUs and 6GB RAM. Several challenges arose from this constrained environment:
 
-- **API server instability** — Running MicroK8s on 1 vCPU caused frequent API server crashes. Increasing to 2 vCPUs resolved this.
+- **API server instability** — Running MicroK8s on 1 vCPU caused frequent API server crashes. Increasing to 4 vCPUs and 6GB RAM resolved this.
 - **Replica limits** — Attempting to run 5+ replicas simultaneously overwhelmed the VM. Keeping replicas at 2-3 maintained stability while still demonstrating scaling concepts.
 - **Image pull timeouts** — Some MicroK8s addon installations timed out due to slow network conditions inside the VM. The local registry mitigated this for application deployments.
 
