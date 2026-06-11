@@ -3,51 +3,127 @@
 
 ---
 
-## 1. System Architecture & Design Choices
+## 1. Project Overview
 
-### Application
-The application is a stateless REST API built with Python Flask. It exposes two endpoints: a main endpoint (`/`) that returns a JSON response including the pod hostname, and a health endpoint (`/health`) used by Kubernetes probes. The stateless design was chosen deliberately — it means any pod can handle any request, making horizontal scaling straightforward with no session affinity required.
+This project demonstrates a cloud-native microservices deployment using MicroK8s on a local virtual machine. The system is composed of a stateless REST API application deployed as a containerized pod, coordinated by Kubernetes. The application is managed through a complete local DevOps pipeline — from Docker image building, to pushing to a private local registry, to deployment on a single-node MicroK8s cluster.
 
-### Containerization
-The application is packaged using a `python:3.12-slim` base image, chosen for its minimal footprint (~150MB vs ~900MB for the full Python image). This reduces attack surface, speeds up image pulls from the local registry, and conserves disk space — important on constrained hardware.
+The system is composed of the following Kubernetes resources:
 
-### Local Registry
-Rather than pulling from Docker Hub, images are pushed to MicroK8s's built-in private registry at `localhost:32000`. This eliminates external network dependency during deployment, speeds up pod startup, and mirrors real production workflows where organizations maintain private registries for security and control.
+| Resource | Name | Purpose |
+|---|---|---|
+| Deployment | myapp | Manages application pod replicas |
+| Service | myapp-service | Internal load balancing (ClusterIP) |
+| Ingress | myapp-ingress | Routes external traffic to the service |
+| HPA | myapp-hpa | Automatic horizontal scaling based on CPU |
+| ResourceQuota | myapp-quota | Enforces hard resource limits at namespace level |
+
+---
+
+## 2. Application Node
+
+The application is a stateless REST API built with Python Flask, running inside a python:3.12-slim container, exposed on port 5000. It was deliberately designed as stateless — meaning no session data, no database, and no persistent storage — so that any pod replica can handle any request interchangeably. This is the foundation that makes horizontal scaling and load balancing possible.
+
+The service exposes two endpoints:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| / | GET | Returns a JSON response with a welcome message and the pod hostname |
+| /health | GET | Returns {"status": "ok"} used by Kubernetes liveness and readiness probes |
+
+The / endpoint returns the pod hostname in its response, which allows traffic distribution across replicas to be visually verified during load balancing demonstrations.
+
+Technical details:
+- Base image: python:3.12-slim
+- Framework: Flask 3.0.0
+- Exposed port: 5000
+- Environment: No external dependencies, fully self-contained
+
+---
+
+## 3. Containerization & Image Workflow
+
+The application is packaged using a Dockerfile. The python:3.12-slim base image was chosen over the full python:3.12 image for the following reasons:
+
+- Size: ~150MB vs ~900MB for the full image
+- Security: Smaller attack surface with fewer pre-installed packages
+- Performance: Faster image pulls from the local registry
+- Resource efficiency: Important on constrained VM hardware
+
+The image workflow follows a local DevOps pipeline:
+
+1. Build the image locally with Docker
+2. Tag it for the local MicroK8s registry (localhost:32000/myapp:latest)
+3. Push to the local registry
+4. MicroK8s pulls from localhost:32000 during pod creation
+
+Using a local private registry rather than Docker Hub eliminates external network dependency during deployment, speeds up pod startup, and mirrors real production workflows where organizations maintain private registries for security and version control.
+
+---
+
+## 4. Kubernetes Architecture
+
+### Deployment
+The Deployment resource manages the application pod replicas. It defines the container image, resource constraints, and health probes. The replicas field is managed dynamically by the HPA based on CPU load.
+
+### Service
+A ClusterIP Service named myapp-service provides stable internal DNS and load balancing across pod replicas. It listens on port 80 and forwards traffic to port 5000 on the pods. The ClusterIP type was chosen because external access is handled exclusively through the Ingress controller.
 
 ### Ingress
-Traffic routing is handled by the NGINX ingress controller (deployed via Helm). An Ingress resource routes external HTTP requests to `myapp.local` through to the internal ClusterIP service, which then distributes traffic across pod replicas. This separation of concerns — Ingress for routing, Service for discovery, Deployment for compute — follows Kubernetes best practices.
+An NGINX Ingress controller (deployed via Helm with MetalLB providing a stable external IP) routes external HTTP traffic from myapp.local to myapp-service. NGINX was chosen over the default MicroK8s Traefik controller due to stability issues encountered during deployment — Traefik repeatedly failed to initialize due to Gateway API CRD timeout errors on the constrained VM hardware.
 
----
+### Horizontal Pod Autoscaler (HPA)
+The HPA monitors CPU utilization across all pod replicas and automatically adjusts the replica count:
 
-## 2. Core Features Implementation
+| Setting | Value |
+|---|---|
+| Minimum replicas | 2 |
+| Maximum replicas | 5 |
+| CPU target | 50% utilization |
 
-### Horizontal Scaling
-The Deployment is configured with multiple replicas managed by a Horizontal Pod Autoscaler (HPA). The HPA monitors CPU utilization and scales between a defined minimum and maximum replica count automatically. Manual scaling via `kubectl scale` was also demonstrated, showing immediate replica adjustment without downtime.
+Under normal conditions (low CPU), the HPA maintains 2 replicas. Under high load (CPU > 50%), it scales up to a maximum of 5 replicas automatically.
 
-### Self-Healing Architecture
-Liveness and Readiness probes are defined on each container, both targeting the `/health` endpoint:
-- **Readiness probe** — prevents traffic from reaching a pod until it is fully initialized
-- **Liveness probe** — continuously monitors pod health and triggers automatic restart if the container becomes unresponsive
+### Self-Healing
+Liveness and Readiness probes are defined on each container, both targeting the /health endpoint:
 
-During testing, deleting a running pod demonstrated that Kubernetes immediately spawned a replacement, and traffic continued flowing to the remaining pods without interruption.
+- Readiness probe: prevents traffic from reaching a pod until it passes the health check
+- Liveness probe: continuously monitors pod health and triggers automatic restart if unresponsive
+
+During testing, manually deleting a running pod demonstrated that Kubernetes immediately spawned a replacement, and traffic continued flowing to the remaining pods without interruption.
 
 ### Resource Constraints
-Given the limited hardware (2 vCPU, 4GB RAM), resource requests and limits were carefully defined:
-- CPU request: `100m` (0.1 core) — guarantees baseline scheduling
-- CPU limit: `250m` (0.25 core) — prevents any single pod from monopolizing the CPU
-- Memory request: `64Mi` — guaranteed allocation
-- Memory limit: `128Mi` — prevents memory leaks from destabilizing the node
+Resource requests and limits are defined on each container:
 
-These conservative values allowed stable operation of multiple pods on a single-node cluster.
+| Resource | Request | Limit |
+|---|---|---|
+| CPU | 100m (0.1 core) | 250m (0.25 core) |
+| Memory | 64Mi | 128Mi |
 
 ---
 
-## 3. Hardware Constraints & Lessons Learned
+## 5. Resource Governance
 
-The project was deployed on a QEMU virtual machine running Ubuntu 24.04 LTS with 4 vCPUs and 6GB RAM. Several challenges arose from this constrained environment:
+During the demonstration, it was observed that Kubernetes allows manual scaling beyond the HPA maxReplicas setting. To address this, a ResourceQuota was implemented at the namespace level:
 
-- **API server instability** — Running MicroK8s on 1 vCPU caused frequent API server crashes. Increasing to 4 vCPUs and 6GB RAM resolved this.
-- **Replica limits** — Attempting to run 5+ replicas simultaneously overwhelmed the VM. Keeping replicas at 2-3 maintained stability while still demonstrating scaling concepts.
-- **Image pull timeouts** — Some MicroK8s addon installations timed out due to slow network conditions inside the VM. The local registry mitigated this for application deployments.
+| Resource | Hard Limit |
+|---|---|
+| Pods | 6 |
+| CPU requests | 600m |
+| CPU limits | 1500m |
+| Memory requests | 384Mi |
+| Memory limits | 768Mi |
 
-These constraints reinforced the importance of right-sizing resource requests and limits in Kubernetes manifests, and highlighted why the HPA's ability to scale down during low load is valuable in resource-constrained environments.
+This creates a two-layer governance model:
+
+- HPA: manages automatic scaling within the range of 2-5 pods
+- ResourceQuota: enforces a hard namespace limit of 6 pods, preventing manual abuse beyond the HPA maximum
+
+---
+
+## 6. Hardware Constraints & Lessons Learned
+
+The project was deployed on a QEMU virtual machine running Ubuntu 24.04 LTS with 4 vCPUs and 6GB RAM. Several challenges arose during development:
+
+- Single CPU instability: Initially running MicroK8s on 1 vCPU caused frequent API server crashes. Increasing to 4 vCPUs resolved this.
+- Ingress controller failures: The default Traefik ingress repeatedly timed out. Resolved by deploying NGINX via Helm with MetalLB.
+- HPA scaling during reboot: CPU spikes after reboots caused the HPA to scale up. Mitigated by setting sensible maxReplicas and implementing ResourceQuota.
+- Resource right-sizing: Conservative CPU and memory limits were essential to maintain stability while running multiple pods on a single-node cluster.
